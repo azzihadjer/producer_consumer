@@ -47,7 +47,7 @@ int main() {
 
     buffer = (struct Buffer *)shmat(shm_id, NULL, 0);  
 
-s
+
     if (sem_init(&empty, 1, BUFFER_SIZE) == -1) {
         perror("sem_init empty failed");
         exit(1);
