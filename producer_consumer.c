@@ -14,7 +14,7 @@
 // Buffer structure
 struct Buffer {
     int data[BUFFER_SIZE];
-    int count;  // Tracks number of items in the buffer
+    int in, out;
 };
 
 // Semaphores
@@ -24,51 +24,63 @@ sem_t empty, full, mutex;
 int shmid;
 
 // Producer function
-void add_to_buffer(struct Buffer *buffer, int item) {
-    buffer->data[buffer->count] = item;
-    printf("Producer produced: %d\n", item);
-    buffer->count++;  // Increment count as an item is added
-}
-
-void remove_from_buffer(struct Buffer *buffer, int *item) {
-    *item = buffer->data[buffer->count - 1];
-    printf("Consumer consumed: %d\n", *item);
-    buffer->count--;  // Decrement count as an item is removed
-}
-
 void producer(struct Buffer *buffer) {
     int item;
     for (int i = 0; i < NUM_ITEMS; i++) {
-        item = rand() % 100;  // Generate a random item
+        item = rand() % 100;  // Producing an item
 
+        // Wait for empty space
         sem_wait(&empty);
+        // Wait for exclusive access
         sem_wait(&mutex);
 
-        add_to_buffer(buffer, item);
+        // Add the item to the buffer
+        buffer->data[buffer->in] = item;
+        printf("Producer produced: %d\n", item);
+        buffer->in = (buffer->in + 1) % BUFFER_SIZE;
 
+        // Release the mutex and signal full
         sem_post(&mutex);
         sem_post(&full);
 
-        sleep(1);  // Simulate work
+        sleep(1);  // Simulate time delay
     }
 }
 
+// Consumer function
 void consumer(struct Buffer *buffer) {
     int item;
     for (int i = 0; i < NUM_ITEMS; i++) {
+        // Wait for a full buffer
         sem_wait(&full);
+        // Wait for exclusive access
         sem_wait(&mutex);
 
-        remove_from_buffer(buffer, &item);
+        // Remove the item from the buffer
+        item = buffer->data[buffer->out];
+        printf("Consumer consumed: %d\n", item);
+        buffer->out = (buffer->out + 1) % BUFFER_SIZE;
 
+        // Release the mutex and signal empty
         sem_post(&mutex);
         sem_post(&empty);
 
-        sleep(2);  // Simulate work
+        sleep(2);  // Simulate time delay
     }
 }
 
-void createProducerAndConsumerProcesses(struct Buffer *buffer) {
+int main() {
+    // Shared memory setup for buffer
+    shmid = shmget(IPC_PRIVATE, sizeof(struct Buffer), IPC_CREAT | 0666);
+    struct Buffer *buffer = (struct Buffer *)shmat(shmid, NULL, 0);
+    buffer->in = buffer->out = 0;
+
+    // Initialize semaphores
+    sem_init(&empty, 1, BUFFER_SIZE);
+    sem_init(&full, 1, 0);
+    sem_init(&mutex, 1, 1);
+
+    // Fork to create producer and consumer processes
     pid_t pid = fork();
 
     if (pid < 0) {
@@ -79,7 +91,6 @@ void createProducerAndConsumerProcesses(struct Buffer *buffer) {
     if (pid == 0) {
         // Child process: consumer
         consumer(buffer);
-        exit(0);  // Ensure the child exits after consuming
     } else {
         // Parent process: producer
         producer(buffer);
@@ -87,38 +98,15 @@ void createProducerAndConsumerProcesses(struct Buffer *buffer) {
         // Wait for the child process to finish
         wait(NULL);
 
-        // Cleanup
+        // Clean up
         sem_destroy(&empty);
         sem_destroy(&full);
         sem_destroy(&mutex);
 
+        // Detach and remove shared memory
         shmdt(buffer);
-        shmctl(shmid, IPC_RMID, NULL);  // Remove shared memory
+        shmctl(shmid, IPC_RMID, NULL);
     }
-}
-
-int main() {
-    // Shared memory setup for buffer
-    shmid = shmget(IPC_PRIVATE, sizeof(struct Buffer), IPC_CREAT | 0666);
-    if (shmid < 0) {
-        perror("shmget failed");
-        exit(1);
-    }
-
-    struct Buffer *buffer = (struct Buffer *)shmat(shmid, NULL, 0);
-    if (buffer == (void *)-1) {
-        perror("shmat failed");
-        exit(1);
-    }
-    buffer->count = 0;  // Initialize count to 0
-
-    // Initialize semaphores
-    sem_init(&empty, 1, BUFFER_SIZE);  // BUFFER_SIZE empty slots
-    sem_init(&full, 1, 0);              // 0 full slots initially
-    sem_init(&mutex, 1, 1);            // Mutex for mutual exclusion
-
-    // Fork to create producer and consumer processes
-    createProducerAndConsumerProcesses(buffer);
 
     return 0;
 }
