@@ -7,9 +7,8 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define BUFFER_SIZE 5  // Size of the buffer
-#define NUM_ITEMS 10   // Number of items the producer/consumer will produce/consume
-
+#define BUFFER_SIZE 5
+#define NUM_ITEMS 10   
 
 typedef struct {
     int buffer[BUFFER_SIZE];
