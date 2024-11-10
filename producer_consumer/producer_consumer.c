@@ -1,9 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <semaphore.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/wait.h>
 
 #define BUFFER_SIZE 5  // Number of items that can be stored in the buffer
 
@@ -14,15 +15,21 @@ struct Buffer {
     int out;                  // Index for consumer
 };
 
-// Semaphore variables
-sem_t empty;   // Semaphore to count empty slots
-sem_t full;    // Semaphore to count full slots
-sem_t mutex;   // Mutex for mutual exclusion
+// Semaphore operation wrappers for convenience
+void sem_wait(int semid, int sem_num) {
+    struct sembuf sb = {sem_num, -1, 0};
+    semop(semid, &sb, 1);
+}
+
+void sem_signal(int semid, int sem_num) {
+    struct sembuf sb = {sem_num, 1, 0};
+    semop(semid, &sb, 1);
+}
 
 // Producer function
-void produce(struct Buffer *buffer, int item) {
-    sem_wait(&empty);   // Wait if buffer is full
-    sem_wait(&mutex);   // Lock buffer (mutual exclusion)
+void produce(struct Buffer *buffer, int semid, int item) {
+    sem_wait(semid, 0);  // Wait for empty slot
+    sem_wait(semid, 2);  // Mutex lock
 
     // Produce an item and add it to the buffer
     buffer->buffer[buffer->in] = item;
@@ -30,14 +37,14 @@ void produce(struct Buffer *buffer, int item) {
 
     printf("Produced: %d\n", item);
 
-    sem_post(&mutex);   // Unlock buffer
-    sem_post(&full);    // Signal that the buffer has an item
+    sem_signal(semid, 2);  // Mutex unlock
+    sem_signal(semid, 1);  // Signal that buffer has an item
 }
 
 // Consumer function
-void consume(struct Buffer *buffer) {
-    sem_wait(&full);    // Wait if buffer is empty
-    sem_wait(&mutex);   // Lock buffer (mutual exclusion)
+void consume(struct Buffer *buffer, int semid) {
+    sem_wait(semid, 1);  // Wait for full slot
+    sem_wait(semid, 2);  // Mutex lock
 
     // Consume an item from the buffer
     int item = buffer->buffer[buffer->out];
@@ -45,12 +52,12 @@ void consume(struct Buffer *buffer) {
 
     printf("Consumed: %d\n", item);
 
-    sem_post(&mutex);   // Unlock buffer
-    sem_post(&empty);   // Signal that the buffer has space
+    sem_signal(semid, 2);  // Mutex unlock
+    sem_signal(semid, 0);  // Signal that buffer has an empty slot
 }
 
 int main() {
-    int shm_id;
+    int shm_id, sem_id;
     struct Buffer *buffer;
 
     // Create shared memory
@@ -63,19 +70,17 @@ int main() {
     buffer = (struct Buffer *)shmat(shm_id, NULL, 0);  // Attach shared memory
     buffer->in = buffer->out = 0;  // Initialize buffer indices
 
+    // Create semaphores
+    sem_id = semget(IPC_PRIVATE, 3, IPC_CREAT | 0666);
+    if (sem_id == -1) {
+        perror("semget failed");
+        exit(1);
+    }
+
     // Initialize semaphores
-    if (sem_init(&empty, 1, BUFFER_SIZE) == -1) {
-        perror("sem_init empty failed");
-        exit(1);
-    }
-    if (sem_init(&full, 1, 0) == -1) {
-        perror("sem_init full failed");
-        exit(1);
-    }
-    if (sem_init(&mutex, 1, 1) == -1) {
-        perror("sem_init mutex failed");
-        exit(1);
-    }
+    semctl(sem_id, 0, SETVAL, BUFFER_SIZE);  // Semaphore 0 (empty slots)
+    semctl(sem_id, 1, SETVAL, 0);            // Semaphore 1 (full slots)
+    semctl(sem_id, 2, SETVAL, 1);            // Semaphore 2 (mutex)
 
     // Fork process to create producer and consumer
     pid_t pid = fork();
@@ -83,7 +88,7 @@ int main() {
     if (pid == 0) {
         // Child process (Consumer)
         for (int i = 0; i < 5; i++) {
-            consume(buffer);  // Consume an item
+            consume(buffer, sem_id);  // Consume an item
             sleep(1);  // Simulate some delay
         }
         printf("Consumer done.\n");  // Print .done after consuming all items
@@ -92,16 +97,14 @@ int main() {
     } else if (pid > 0) {
         // Parent process (Producer)
         for (int i = 0; i < 5; i++) {
-            produce(buffer, i);  // Produce an item with number i
+            produce(buffer, sem_id, i);  // Produce an item with number i
             sleep(1);  // Simulate some delay
         }
         printf("Producer done.\n");  // Print .done after producing all items
         wait(NULL);  // Wait for child process to finish
 
         // Clean up semaphores and shared memory
-        sem_destroy(&empty);
-        sem_destroy(&full);
-        sem_destroy(&mutex);
+        semctl(sem_id, 0, IPC_RMID);  // Remove semaphore set
         shmdt(buffer);  // Detach shared memory
         shmctl(shm_id, IPC_RMID, NULL);  // Destroy shared memory
     } else {
